@@ -1,0 +1,93 @@
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    upstream php-handler {
+        server nextcloud:9000;
+    }
+
+    upstream office-handler {
+        server onlyoffice:80;
+    }
+
+    server {
+        listen 80;
+        server_name _;
+
+        root /var/www/html;
+        index index.php index.html;
+
+        client_max_body_size 512M;
+        fastcgi_buffers 64 4K;
+
+        # 1. Інтеграція OnlyOffice Docs + Підтримка WebSockets
+        location ^~ /ds-vpath/ {
+            proxy_pass http://office-handler/;
+            proxy_http_version 1.1;
+            
+            # Вимикаємо буферизацію, щоб літери не застрягали в проксі
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+            
+            # Прокидання WebSocket заголовків (Upgrade сесії)
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # 2. Кеш та конвертація документів OnlyOffice
+        location ~* ^/(cache|files)/ {
+            proxy_pass http://office-handler;
+            proxy_http_version 1.1;
+            proxy_buffering off;
+            
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # Правило для кореневого запиту Nextcloud
+        location / {
+            try_files $uri $uri/ /index.php$request_uri;
+        }
+
+        # Обробка PHP через FastCGI
+        location ~ ^\/(?:index|remote|public|cron|core\/ajax\/update|status|ocs\/v[12]|signer\/(?:user-info|login))\.php(?:$|\/) {
+            fastcgi_split_path_info ^(.+?\.php)(\/.*)$;
+            set $path_info $fastcgi_path_info;
+            try_files $fastcgi_script_name =404;
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            fastcgi_param PATH_INFO $path_info;
+            fastcgi_param ModPagespeed "off";
+            fastcgi_pass php-handler;
+        }
+
+        # Кеш статики СУТО для Nextcloud (ігноруємо шляхи офісу)
+        location ~ \.(?:css|js|woff2?|svg|gif|map)$ {
+            # Якщо запит йде до офісу, не чіпаємо його тут
+            if ($request_uri ~* "/ds-vpath/") {
+                break;
+            }
+            try_files $uri /index.php$request_uri;
+            add_header Cache-Control "public, max-age=15778463";
+        }
+
+        location ~ \.(?:png|html|ttf|ico|jpg|jpeg|bcmap|mp4|webm)$ {
+            if ($request_uri ~* "/ds-vpath/") {
+                break;
+            }
+            try_files $uri /index.php$request_uri;
+        }
+    }
+}

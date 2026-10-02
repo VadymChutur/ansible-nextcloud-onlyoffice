@@ -1,0 +1,20 @@
+# Ansible
+*.retry
+vault_pass.txt
+host_vars/*_secrets.yml
+
+# Ключі, паролі та змінні середовища
+.env
+*.key
+secrets.txt
+credentials.yml
+
+# Системні файли ОС
+Thumbs.db
+.DS_Store
+
+# Логи
+*.log
+
+#Шрифти
+*.ttf

@@ -1,0 +1,251 @@
+---
+# === ЧАСТИНА 1: ЗБІР ДАНИХ ТА ГЕНЕРАЦІЯ ХОСТА У ПАМ'ЯТІ ===
+- name: Prompt for Target Host and Dynamic Connection Details
+  hosts: localhost
+  gather_facts: false
+  vars_prompt:
+    - name: target_host
+      prompt: "Введіть IP-адресу або домен цільового сервера (куди деплоїмо)"
+      private: false
+
+    - name: target_user
+      prompt: "Введіть ім'я SSH-користувача на сервері (наприклад, exemple)"
+      private: false
+
+    - name: ansible_become_password
+      prompt: "Введіть пароль sudo для цього віддаленого сервера (BECOME)"
+      private: true
+
+    - name: ts_domain
+      prompt: "Введіть ваш Tailscale домен (наприклад, nextcloud.exemple.ts.net)"
+      private: false
+
+    - name: db_password
+      prompt: "Введіть новий пароль для бази даних PostgreSQL"
+      private: true
+
+    - name: redis_password
+      prompt: "Введіть новий пароль для сервісу Redis"
+      private: true
+
+    - name: onlyoffice_jwt
+      prompt: "Введіть секретний ключ JWT для ONLYOFFICE Docs"
+      private: true
+
+    - name: user_count
+      prompt: "Скільки користувачів Nextcloud створити?"
+      private: false
+      default: "1"
+
+    - name: start_index
+      prompt: "Початковий індекс для генерації користувачів (наприклад, 101)"
+      private: false
+      default: "101"
+
+    - name: common_password
+      prompt: "Введіть однаковий пароль для цих користувачів Nextcloud"
+      private: true
+
+  tasks:
+    - name: Dynamically create target host in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ target_host }}"
+        groups: dynamic_workspace_hosts
+        ansible_user: "{{ target_user }}"
+        ansible_become_password: "{{ ansible_become_password }}"
+        # Передаємо всі зібрані змінні на наступний крок деплою
+        ts_domain: "{{ ts_domain }}"
+        db_password: "{{ db_password }}"
+        redis_password: "{{ redis_password }}"
+        onlyoffice_jwt: "{{ onlyoffice_jwt }}"
+        user_count: "{{ user_count }}"
+        start_index: "{{ start_index }}"
+        common_password: "{{ common_password }}"
+
+# === ЧАСТИНА 2: БОЙОВИЙ ДЕПЛОЙ НА СТВОРЕНИЙ ХОСТ ===
+- name: Deploy Monolith Workspace with Automated ONLYOFFICE Integration
+  hosts: dynamic_workspace_hosts
+  become: true
+  vars:
+    base_dir: "/opt/workspace"
+
+  tasks:
+    # --- КРОК 1: ПІДГОТОВКА ТА ВСТАНОВЛЕННЯ DOCKER ---
+    - name: Quenching apt constraints for engine deployment
+      apt:
+        name: [ 'apt-transport-https', 'ca-certificates', 'curl', 'gnupg', 'lsb-release' ]
+        state: present
+        update_cache: yes
+      tags: [ docker, pre_reqs ]
+
+    - name: Add Docker GPG apt Key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+      tags: [ docker, pre_reqs ]
+
+    - name: Add Docker Repository
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable
+        state: present
+      tags: [ docker, pre_reqs ]
+
+    - name: Install Docker Engine
+      apt:
+        name: [ 'docker-ce', 'docker-ce-cli', 'containerd.io', 'docker-buildx-plugin', 'docker-compose-plugin' ]
+        state: present
+      tags: [ docker, engine ]
+
+    # --- КРОК 3: СТВОРЕННЯ ЧИСТИХ ДИРЕКТОРІЙ З ПРАВАМИ 0775 ---
+    - name: Create base workspace directory
+      file:
+        path: "{{ base_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: docker
+        mode: '0775'
+      tags: [ infra, folders ]
+
+    - name: Create component subdirectories
+      file:
+        path: "{{ base_dir }}/{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: docker
+        mode: '0775'
+      loop: [ 'postgres', 'redis', 'nextcloud', 'nginx', 'n8n', 'grafana', 'onlyoffice', 'onlyoffice/data', 'onlyoffice/logs' ]
+      tags: [ infra, folders ]
+
+    # --- КРОК 4: ДЕПЛОЙ КОНФІГУРАЦІЙНИХ ФАЙЛІВ ---
+    - name: Deploy Nginx Configuration from Template
+      template:
+        src: templates/nginx.conf.j2
+        dest: "{{ base_dir }}/nginx/nginx.conf"
+        mode: '0644'
+      tags: [ infra, configs ]
+
+    - name: Deploy Dynamic Docker Compose from Template
+      template:
+        src: templates/docker-compose.yml.j2
+        dest: "{{ base_dir }}/docker-compose.yml"
+        mode: '0644'
+      tags: [ infra, configs ]
+
+    # --- КРОК 5: ЗАПУСК СТЕКУ СЕРВІСІВ ---
+    - name: Start Docker Compose services
+      shell: "docker compose up -d"
+      args:
+        chdir: "{{ base_dir }}"
+      tags: [ infra, compose_start ]
+
+    - name: Wait for Nextcloud container to fully initialize
+      pause:
+        seconds: 25
+      tags: [ infra, compose_start ]
+
+    # --- КРОК 6: ПОВНА АВТОМАТИЗАЦІЯ НАЛАШТУВАНЬ NEXTCLOUD ТА ONLYOFFICE ---
+    - name: Install ONLYOFFICE App inside Nextcloud
+      shell: "docker compose exec -T --user www-data nextcloud php occ app:install onlyoffice"
+      args:
+        chdir: "{{ base_dir }}"
+      failed_when: false
+      tags: [ app-install, onlyoffice ]
+
+    - name: Enable ONLYOFFICE App
+      shell: "docker compose exec -T --user www-data nextcloud php occ app:enable onlyoffice"
+      args:
+        chdir: "{{ base_dir }}"
+      tags: [ app-install, onlyoffice ]
+
+    - name: Configure Nextcloud Global URL Parameters
+      shell: |
+        docker compose exec -T --user www-data nextcloud php occ config:system:set trusted_domains 2 --value="{{ ts_domain }}"
+        docker compose exec -T --user www-data nextcloud php occ config:system:set trusted_domains 3 --value="nextcloud"
+        docker compose exec -T --user www-data nextcloud php occ config:system:set trusted_domains 4 --value="web"
+        docker compose exec -T --user www-data nextcloud php occ config:system:set overwritehost --value="{{ ts_domain }}"
+        docker compose exec -T --user www-data nextcloud php occ config:system:set allow_local_remote_servers --value=true --type=boolean
+      args:
+        chdir: "{{ base_dir }}"
+      tags: [ nc-config, network ]
+
+    - name: Inject ONLYOFFICE Connector Options (App Database Engine Settings)
+      shell: |
+        docker compose exec -T --user www-data nextcloud php occ config:app:set onlyoffice DocumentServerUrl --value="http://{{ ts_domain }}/ds-vpath/"
+        docker compose exec -T --user www-data nextcloud php occ config:app:set onlyoffice DocumentServerInternalUrl --value="http://onlyoffice/"
+        docker compose exec -T --user www-data nextcloud php occ config:app:set onlyoffice StorageUrl --value=""
+        docker compose exec -T --user www-data nextcloud php occ config:app:set onlyoffice forcesave --value="true"
+        docker compose exec -T --user www-data nextcloud php occ config:app:set onlyoffice verify_peer_off --value="true"
+        docker compose exec -T --user www-data nextcloud php occ config:app:set onlyoffice preview --value="false"
+        docker compose exec -T --user www-data nextcloud php occ config:app:set onlyoffice jwt_secret --value="{{ onlyoffice_jwt }}"
+        docker compose exec -T --user www-data nextcloud php occ config:app:set onlyoffice jwt_header --value="Authorization"
+      args:
+        chdir: "{{ base_dir }}"
+      register: occ_final_result
+      tags: [ nc-config, onlyoffice-link ]
+
+    - name: Show Final Integration Status
+      debug:
+        var: occ_final_result.stdout_lines
+      tags: [ nc-config, onlyoffice-link ]
+
+    # --- КРОК 7: ОЧИЩЕННЯ СКЕЛЕТА (ЧИСТЕ СХОВИЩЕ ДЛЯ НОВИХ ЮЗЕРІВ) ---
+    - name: Disable default Nextcloud skeleton files for new users
+      shell: "docker compose exec -T --user www-data nextcloud php occ config:system:set skeletondirectory --value=''"
+      args:
+        chdir: "{{ base_dir }}"
+      tags: [ nc-config, skeleton ]
+
+    # --- КРОК 8: КЕРУВАННЯ ГРУПАМИ ПРАВ ДОСТУПУ ---
+    - name: Create OnlyOffice access group
+      shell: "docker compose exec -T --user www-data nextcloud php occ group:add onlyoffice_users"
+      args:
+        chdir: "{{ base_dir }}"
+      failed_when: false
+      tags: [ nc-config, groups ]
+
+    # --- КРОК 8.5: ІНТЕГРАЦІЯ КОРПОРАТИВНИХ ШРИФТІВ ---
+    - name: Create custom fonts directory on remote host
+      file:
+        path: "{{ base_dir }}/onlyoffice/fonts"
+        state: directory
+        mode: '0755'
+      tags: [ fonts ]
+
+    - name: Sync fonts pack to remote host
+      copy:
+        src: "files/fonts/"
+        dest: "{{ base_dir }}/onlyoffice/fonts/"
+        mode: '0644'
+      register: fonts_copied
+      tags: [ fonts ]
+
+    - name: Trigger ONLYOFFICE to regenerate fonts cache
+      shell: "docker compose exec -T onlyoffice env LD_LIBRARY_PATH=/var/www/onlyoffice/documentserver/server/FileConverter/bin /var/www/onlyoffice/documentserver/server/tools/allfontsgen"
+      args:
+        chdir: "{{ base_dir }}"
+      when: fonts_copied.changed
+      tags: [ fonts ]
+
+    - name: Flush Redis cache to commit atomic session configuration
+      shell: "docker compose exec -T redis redis-cli -a \"{{ redis_password }}\" FLUSHALL"
+      args:
+        chdir: "{{ base_dir }}"
+      tags: [ nc-config, cache-clear ]
+
+    # --- КРОК 9: МАСОВЕ СТВОРЕННЯ КОРИСТУВАЧІВ ---
+    - name: Mass create generated users and assign to OnlyOffice group
+      shell: |
+        docker compose exec -T -e OC_PASS="{{ common_password }}" --user www-data nextcloud php occ user:add --password-from-env --no-interaction "u{{ item }}"
+        docker compose exec -T --user www-data nextcloud php occ group:adduser onlyoffice_users "u{{ item }}"
+      args:
+        chdir: "{{ base_dir }}"
+      loop: "{{ query('sequence', 'start=' ~ start_index ~ ' count=' ~ user_count) }}"
+      failed_when: false
+      register: user_gen_result
+      tags: [ users ]
+
+    - name: Log created or verified users
+      debug:
+        msg: "Користувач u{{ item }} оброблений (створений або вже існував)."
+      loop: "{{ query('sequence', 'start=' ~ start_index ~ ' count=' ~ user_count) }}"
+      tags: [ users ]
