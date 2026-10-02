@@ -23,6 +23,16 @@ To run the playbook from your local machine, execute the following command:
 
 ```bash
 ansible-playbook -i "localhost," deploy.yml
+```
+
+Upon startup, the script will prompt you to enter:
+- The target server's IP address or domain
+- The SSH username and sudo password
+- Your Tailscale domain
+- Passwords for the database and Redis, and the JWT secret for OnlyOffice
+- The number of users to generate automatically
+
+_________________________________________________________________________________________________________________________________________
 
 # Automated Workspace Deploy: Nextcloud + ONLYOFFICE
 
@@ -49,8 +59,9 @@ ansible-playbook -i "localhost," deploy.yml
 
 Для запуску скрипта на локальній машині виконайте команду:
 
-bash
+```bash
 ansible-playbook -i "localhost," deploy.yml
+```
 
 Під час запуску скрипт попросить вас ввести:
 - IP-адресу або домен цільового сервера

@@ -38,7 +38,7 @@ services:
       - ./onlyoffice/logs:/var/log/onlyoffice
       - ./onlyoffice/fonts:/usr/share/fonts/truetype/custom
     extra_hosts:
-      - "nextcloud.taila85390.ts.net:127.0.0.1"
+      - "nextcloud.exemple.ts.net:127.0.0.1"
     networks:
       - workspace-net
 
@@ -103,7 +103,7 @@ services:
     networks:
       workspace-net:
         aliases:
-          - nextcloud.taila85390.ts.net
+          - nextcloud.exemple.ts.net
 
 networks:
   workspace-net:
