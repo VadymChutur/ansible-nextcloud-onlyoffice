@@ -1,0 +1,8 @@
+# redis.conf.j2
+
+# Встановлюємо пароль
+requirepass {{ redis_password }}
+
+# Вимикаємо збереження на диск
+save ""
+appendonly no
